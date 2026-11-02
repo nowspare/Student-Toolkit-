@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="pure-minimal">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StudyKit -- Everything a student needs, in one place</title>
+<meta name="description" content="70+ tools for students: calculators, study timers, writing helpers, file tools, and productivity widgets.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="icon-btn" id="menuToggle" aria-label="Open menu">☰</button>
+  <a href="#/" class="brand">StudyKit</a>
+  <div class="search-wrap">
+    <input type="search" id="search" placeholder="Search 70+ tools…" autocomplete="off" spellcheck="false">
+    <div class="search-results" id="searchResults" hidden></div>
+  </div>
+  <button class="icon-btn" id="themeBtn" aria-label="Switch theme" title="Switch theme">◐</button>
+</header>
+
+<aside class="sidebar" id="sidebar">
+  <nav>
+    <a href="#/" class="nav-item" data-nav>Dashboard</a>
+    <div class="side-label">Categories</div>
+    <a href="#/c/math" class="nav-item" data-nav>Mathematics</a>
+    <a href="#/c/study" class="nav-item" data-nav>Study &amp; Academic</a>
+    <a href="#/c/writing" class="nav-item" data-nav>Writing &amp; Text</a>
+    <a href="#/c/daily" class="nav-item" data-nav>Daily Life</a>
+    <a href="#/c/files" class="nav-item" data-nav>Files &amp; Documents</a>
+    <a href="#/c/prod" class="nav-item" data-nav>Productivity</a>
+    <div class="side-label">Themes</div>
+    <div class="theme-switcher" id="themeSwitcher"></div>
+  </nav>
+</aside>
+
+<main id="app"></main>
+<div class="toasts" id="toasts"></div>
+<div class="scrim" id="scrim"></div>
+
+<script src="script.js"></script>
+</body>
+</html>
