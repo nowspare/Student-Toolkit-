@@ -390,11 +390,8 @@ label.field > span { display: block; font-size: .82rem; color: var(--muted); mar
   cursor: pointer;
   transition: background .1s;
 }
-.calc-grid button:hover { background: var(--border); }
-.calc-grid button.op { color: var(--accent); font-weight: 500; }
-.calc-grid button.eq { background: var(--accent); color: var(--accent-fg); grid-column: span 2; }
+.calc-grid button.eq { background: var(--accent); color: var(--accent-fg); }
 .calc-grid button.eq:hover { opacity: .88; background: var(--accent); }
-.calc-grid button.wide { grid-column: span 2; }
 
 /* ---------- Flipcard ---------- */
 .flashcard {
