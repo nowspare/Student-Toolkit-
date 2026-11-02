@@ -1,12 +1,14 @@
 'use strict';
 
 /* ============================================================
-   StudyKit -- student utility toolkit
+   StudyKit — student utility toolkit
    Architecture:
      - TOOLS registry (id/name/cat/render)
      - hash router (#/, #/c/cat, #/tool/id)
      - localStorage persistence (all keys namespaced 'sk:')
      - 5 themes applied via [data-theme] on <html>
+     - delegation for card clicks (single listener, added once)
+     - tool-scoped intervals tracked so navigation cannot leak
    ============================================================ */
 
 /* ---------------- Storage ---------------- */
@@ -20,6 +22,7 @@ const LS = {
 const app = document.getElementById('app');
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
 function toast(msg, type = '') {
   const t = document.createElement('div');
   t.className = 'toast ' + type;
@@ -27,10 +30,24 @@ function toast(msg, type = '') {
   document.getElementById('toasts').appendChild(t);
   setTimeout(() => t.remove(), 2600);
 }
+
 function copyText(text) {
   if (!text) return;
-  navigator.clipboard?.writeText(text).then(() => toast('Copied', 'success'), () => toast('Copy failed', 'error'));
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.opacity = '0'; ta.style.top = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); toast('Copied', 'success'); }
+    catch { toast('Copy failed', 'error'); }
+    ta.remove();
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('Copied', 'success'), fallback);
+  } else fallback();
 }
+
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -39,7 +56,7 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function fmtNum(n, d = 2) {
-  if (!isFinite(n)) return '--';
+  if (!isFinite(n)) return '—';
   return Number(n).toLocaleString(undefined, { maximumFractionDigits: d });
 }
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -62,7 +79,7 @@ function loadScript(src) {
   });
 }
 
-/* Tool-scoped intervals -- cleared on every render */
+/* Tool-scoped intervals — cleared on every route change */
 let toolTimers = [];
 function toolInterval(fn, ms) { const id = setInterval(fn, ms); toolTimers.push(id); return id; }
 function clearToolTimers() { toolTimers.forEach(clearInterval); toolTimers = []; }
@@ -105,9 +122,7 @@ const CATS = {
   prod: 'Productivity'
 };
 const TOOLS = [];
-function T(id, name, cat, render, kw = '') {
-  TOOLS.push({ id, name, cat, render, kw });
-}
+function T(id, name, cat, render, kw = '') { TOOLS.push({ id, name, cat, render, kw }); }
 function monogram(name) {
   const words = name.split(/\s+/).filter(Boolean);
   if (words.length === 1) return words[0].slice(0, 2);
@@ -132,10 +147,23 @@ function pushRecent(id) {
 /* ============================================================
    ROUTER
    ============================================================ */
+function updateNav(hash) {
+  $$('.nav-item').forEach(a => a.classList.remove('active'));
+  if (!hash || hash === '#/' || hash === '#') {
+    document.querySelector('.nav-item[href="#/"]')?.classList.add('active');
+  } else if (hash.startsWith('#/c/')) {
+    const cat = hash.match(/^#\/c\/(\w+)/)?.[1];
+    if (cat) document.querySelector(`.nav-item[href="#/c/${cat}"]`)?.classList.add('active');
+  } else if (hash.startsWith('#/tool/')) {
+    const id = hash.match(/^#\/tool\/([\w-]+)/)?.[1];
+    const tool = TOOLS.find(t => t.id === id);
+    if (tool) document.querySelector(`.nav-item[href="#/c/${tool.cat}"]`)?.classList.add('active');
+  }
+}
 function onRoute() {
   clearToolTimers();
   const hash = location.hash || '#/';
-  document.querySelectorAll('.nav-item').forEach(a => a.classList.remove('active'));
+  updateNav(hash);
   if (hash === '#/' || hash === '#') return renderDashboard();
   const m1 = hash.match(/^#\/c\/(\w+)/); if (m1) return renderCategory(m1[1]);
   const m2 = hash.match(/^#\/tool\/([\w-]+)/); if (m2) return renderTool(m2[1]);
@@ -155,19 +183,21 @@ function greeting() {
 function fmtTime(d) {
   return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
+function todayKey() {
+  const d = new Date();
+  return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+}
 function renderDashboard() {
   const favs = getFavs().map(id => TOOLS.find(t => t.id === id)).filter(Boolean);
   const recent = getRecents().map(id => TOOLS.find(t => t.id === id)).filter(Boolean);
-  const popular = ['gpa-calculator','pomodoro','word-counter','password-generator','pdf-merger','to-do','flip-card','percentage-calc']
+  const popular = ['gpa-calc','pomodoro','word-counter','password-gen','pdf-merge','to-do','flip-card','percentage-calc']
     .map(id => TOOLS.find(t => t.id === id)).filter(Boolean);
 
   const tasks = LS.get('todo', []);
   const habits = LS.get('habits', []);
   const notes = LS.get('notes', []);
-  const todayHabitsDone = habits.reduce((n, h) => {
-    const k = h.log?.[todayKey()];
-    return n + (k ? 1 : 0);
-  }, 0);
+  const today = todayKey();
+  const todayHabitsDone = habits.reduce((n, h) => n + (h.log?.[today] ? 1 : 0), 0);
   const tasksDone = tasks.filter(t => t.done).length;
 
   app.innerHTML = `
@@ -183,7 +213,7 @@ function renderDashboard() {
       <div class="stat-card"><div class="v">${tasksDone}/${tasks.length}</div><div class="l">Tasks done</div></div>
       <div class="stat-card"><div class="v">${todayHabitsDone}/${habits.length}</div><div class="l">Habits today</div></div>
       <div class="stat-card"><div class="v">${notes.length}</div><div class="l">Notes saved</div></div>
-      <div class="stat-card"><div class="v">70</div><div class="l">Tools available</div></div>
+      <div class="stat-card"><div class="v">${TOOLS.length}</div><div class="l">Tools available</div></div>
     </div>
 
     ${favs.length ? `<section class="section">
@@ -215,11 +245,6 @@ function renderDashboard() {
     const el = document.getElementById('clockLive');
     if (el) el.textContent = fmtTime(new Date());
   }, 1000);
-
-  app.addEventListener('click', e => {
-    const c = e.target.closest('[data-tool]');
-    if (c) location.hash = '#/tool/' + c.dataset.tool;
-  }, { once: true });
 }
 
 /* ---------------- Category page ---------------- */
@@ -234,10 +259,6 @@ function renderCategory(cat) {
     <div class="grid">${list.map(toolCard).join('')}</div>
   `;
   $('[data-back]').onclick = () => location.hash = '#/';
-  app.addEventListener('click', e => {
-    const c = e.target.closest('[data-tool]');
-    if (c) location.hash = '#/tool/' + c.dataset.tool;
-  }, { once: true });
 }
 
 /* ---------------- Tool page ---------------- */
@@ -296,15 +317,13 @@ function runSearch(q) {
 searchInput.addEventListener('input', e => runSearch(e.target.value));
 searchInput.addEventListener('focus', () => { if (searchInput.value) runSearch(searchInput.value); });
 document.addEventListener('click', e => {
-  if (!e.target.closest('.search-wrap')) { searchResults.hidden = true; }
+  if (!e.target.closest('.search-wrap')) searchResults.hidden = true;
 });
 searchResults.addEventListener('click', () => { searchResults.hidden = true; searchInput.value = ''; });
 
 /* ============================================================
-   TOOLS -- 70 implementations
+   SHARED HELPERS
    ============================================================ */
-
-/* ---------- Shared unit converter factory ---------- */
 function unitConverter(units) {
   return el => {
     const opts = Object.keys(units).map(u => `<option>${u}</option>`).join('');
@@ -339,15 +358,10 @@ function unitConverter(units) {
   };
 }
 
-/* ============================================================
-   A. MATHEMATICS (1–12)
-   ============================================================ */
-
-/* 1. Scientific Calculator */
 function evalExpr(input) {
   let expr = String(input).trim();
   if (!expr) throw new Error('Empty expression');
-  expr = expr.replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-').replace(/π/g, 'pi');
+  expr = expr.replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-');
   if (!/^[0-9+\-*/().,%\s a-zA-Z^]+$/.test(expr)) throw new Error('Invalid character');
   const ids = expr.match(/[a-zA-Z]+/g) || [];
   const safe = { sqrt:1, sin:1, cos:1, tan:1, log:1, ln:1, abs:1, exp:1, round:1, floor:1, ceil:1, pi:1, e:1 };
@@ -361,39 +375,40 @@ function evalExpr(input) {
   return r;
 }
 
+/* ============================================================
+   A. MATHEMATICS (1–12)
+   ============================================================ */
+
+/* 1. Scientific Calculator — input-based, editable, no keypad mess */
 T('sci-calc', 'Scientific Calculator', 'math', el => {
   el.innerHTML = `
-    <div class="calc-display"><div class="hist" id="hist"></div><div id="disp">0</div></div>
-    <div class="calc-grid" id="pad"></div>
-    <p class="tiny muted">Supports + − * / ^ ( ) and functions: sqrt, sin, cos, tan, log, ln, abs, exp, round, floor, ceil, pi, e.</p>
+    <input class="inp" id="disp" placeholder="e.g. 2 + sqrt(9) * pi" style="font-family:ui-monospace,monospace;font-size:1.2rem;text-align:right;padding:14px">
+    <div class="row" style="margin-top:10px">
+      ${['sqrt(', 'sin(', 'cos(', 'tan(', 'log(', 'ln(', 'pi', 'e', '^', '(', ')'].map(f => `<button class="btn-ghost" data-ins="${f}">${f}</button>`).join('')}
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn" id="eq">=</button>
+      <button class="btn-ghost" id="clr">Clear</button>
+      <button class="btn-ghost" id="copy">Copy result</button>
+    </div>
+    <div class="result big" id="out" style="margin-top:12px">—</div>
+    <p class="tiny muted">Functions: sqrt, sin, cos, tan, log, ln, abs, exp, round, floor, ceil. Constants: pi, e. Operators: + − * / ^ ( ).</p>
   `;
-  const disp = el.querySelector('#disp'), hist = el.querySelector('#hist');
-  let expr = '';
-  const keys = [
-    ['C','('],[')','ac'],['sqrt','fn'],['^','op'],['/','op'],
-    ['7','num'],['8','num'],['9','num'],['*','op'],
-    ['4','num'],['5','num'],['6','num'],['-','op'],
-    ['1','num'],['2','num'],['3','num'],['+','op'],
-    ['0','num'],['.','num'],['=','eq']
-  ];
-  const pad = el.querySelector('#pad');
-  pad.innerHTML = keys.map(([k, cls]) => `<button data-k="${k}" class="${cls === 'op' ? 'op' : cls === 'eq' ? 'eq' : cls === 'num' ? '' : ''}">${k}</button>`).join('');
-  pad.addEventListener('click', e => {
-    const b = e.target.closest('button'); if (!b) return;
-    const k = b.dataset.k;
-    if (k === 'C' || k === 'ac') { expr = ''; disp.textContent = '0'; hist.textContent = ''; return; }
-    if (k === '=') {
-      try { const r = evalExpr(expr || '0'); hist.textContent = expr + ' ='; expr = String(r); disp.textContent = r; }
-      catch (e) { hist.textContent = ''; disp.textContent = 'Error'; }
-      return;
-    }
-    if (k === 'sqrt') { expr += 'sqrt('; }
-    else expr += k;
-    disp.textContent = expr || '0';
+  const disp = el.querySelector('#disp'), out = el.querySelector('#out');
+  el.querySelectorAll('[data-ins]').forEach(b => b.onclick = () => {
+    disp.value += b.dataset.ins;
+    disp.focus();
   });
+  el.querySelector('#eq').onclick = () => {
+    try { const r = evalExpr(disp.value); out.textContent = r; out.classList.remove('error'); }
+    catch (e) { out.textContent = e.message; out.classList.add('error'); }
+  };
+  el.querySelector('#clr').onclick = () => { disp.value = ''; out.textContent = '—'; out.classList.remove('error'); disp.focus(); };
+  el.querySelector('#copy').onclick = () => { if (out.textContent !== '—') copyText(out.textContent); };
+  disp.addEventListener('keydown', e => { if (e.key === 'Enter') el.querySelector('#eq').click(); });
 });
 
-/* 2. Basic Calculator */
+/* 2. Basic Calculator — clean 4×5 grid, no span, percent + sign flip */
 T('basic-calc', 'Basic Calculator', 'math', el => {
   el.innerHTML = `
     <div class="calc-display"><div id="disp2">0</div></div>
@@ -401,32 +416,43 @@ T('basic-calc', 'Basic Calculator', 'math', el => {
   `;
   const disp = el.querySelector('#disp2');
   let cur = '0', prev = null, op = null, reset = false;
-  const keys = ['C','⌫','÷','×','7','8','9','−','4','5','6','+','1','2','3','=','0','.',''];
+  const keys = [
+    ['C','ac'],['⌫','act'],['%','op'],['÷','op'],
+    ['7',''],['8',''],['9',''],['×','op'],
+    ['4',''],['5',''],['6',''],['−','op'],
+    ['1',''],['2',''],['3',''],['+','op'],
+    ['0',''],['.',''],['±',''],['=','eq']
+  ];
   const pad = el.querySelector('#pad2');
-  pad.innerHTML = keys.map(k => k ? `<button data-k="${k}" class="${['÷','×','−','+'].includes(k) ? 'op' : ''} ${k==='='?'eq':''}">${k}</button>` : '').join('');
-  function show() { disp.textContent = cur.length > 14 ? (+cur).toExponential(6) : cur; }
+  pad.innerHTML = keys.map(([k, cls]) => `<button data-k="${k}" class="${cls === 'op' ? 'op' : ''} ${cls === 'eq' ? 'eq' : ''}">${k}</button>`).join('');
+  function show() { disp.textContent = (String(cur).length > 14 && isFinite(+cur)) ? (+cur).toExponential(6) : cur; }
+  function calc(a, b, o) {
+    switch (o) { case '+': return a + b; case '−': return a - b; case '×': return a * b; case '÷': return b === 0 ? NaN : a / b; }
+    return b;
+  }
   pad.addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
     const k = b.dataset.k;
-    if (!k) return;
     if (k === 'C') { cur = '0'; prev = null; op = null; reset = false; show(); return; }
     if (k === '⌫') { cur = cur.length > 1 ? cur.slice(0, -1) : '0'; show(); return; }
+    if (k === '%') { const n = parseFloat(cur); cur = String(isFinite(n) ? n / 100 : 0); reset = false; show(); return; }
+    if (k === '±') { cur = String(-parseFloat(cur) || 0); show(); return; }
     if (['÷','×','−','+'].includes(k)) {
-      if (op !== null && !reset) { cur = String(calc(prev, +cur, op)); }
+      if (op !== null && !reset) cur = String(calc(prev, +cur, op));
       prev = +cur; op = k; reset = true; show(); return;
     }
     if (k === '=') {
       if (op === null) return;
       cur = String(calc(prev, +cur, op)); op = null; prev = null; reset = true; show(); return;
     }
-    if (k === '.') { if (!cur.includes('.')) cur += '.'; else if (reset) cur = '0.'; reset = false; show(); return; }
+    if (k === '.') {
+      if (reset) { cur = '0.'; reset = false; }
+      else if (!cur.includes('.')) cur += '.';
+      show(); return;
+    }
     if (reset) { cur = k; reset = false; } else { cur = cur === '0' ? k : cur + k; }
     show();
   });
-  function calc(a, b, o) {
-    switch (o) { case '+': return a + b; case '−': return a - b; case '×': return a * b; case '÷': return b === 0 ? NaN : a / b; }
-    return b;
-  }
 });
 
 /* 3. Percentage Calculator */
@@ -445,51 +471,51 @@ T('percentage-calc', 'Percentage Calculator', 'math', el => {
       <input type="number" class="inp" id="a" placeholder="Value A" step="any">
       <input type="number" class="inp" id="b" placeholder="Value B" step="any">
     </div>
-    <div class="result big" id="out">--</div>
+    <div class="result big" id="out">—</div>
   `;
   const mode = el.querySelector('#mode'), A = el.querySelector('#a'), B = el.querySelector('#b'), out = el.querySelector('#out');
   function run() {
     const a = parseFloat(A.value), b = parseFloat(B.value);
-    if (!isFinite(a) || !isFinite(b)) { out.textContent = '--'; out.classList.remove('error'); return; }
+    if (!isFinite(a) || !isFinite(b)) { out.textContent = '—'; return; }
     let r;
     switch (mode.value) {
       case 'pct-of': r = (a / 100) * b; out.textContent = fmtNum(r, 4); break;
-      case 'is-what': r = (a / b) * 100; out.textContent = b === 0 ? 'Cannot divide by zero' : fmtNum(r, 4) + '%'; break;
-      case 'change': r = b === 0 ? NaN : ((b - a) / a) * 100; out.textContent = isFinite(r) ? (r >= 0 ? '+' : '') + fmtNum(r, 4) + '%' : '--'; break;
-      case 'add': r = b * (1 + a / 100); out.textContent = fmtNum(r, 4); break;
-      case 'sub': r = b * (1 - a / 100); out.textContent = fmtNum(r, 4); break;
+      case 'is-what': out.textContent = b === 0 ? 'Cannot divide by zero' : fmtNum((a / b) * 100, 4) + '%'; break;
+      case 'change': out.textContent = a === 0 ? 'Baseline is zero' : ((b - a) / a * 100 >= 0 ? '+' : '') + fmtNum((b - a) / a * 100, 4) + '%'; break;
+      case 'add': out.textContent = fmtNum(b * (1 + a / 100), 4); break;
+      case 'sub': out.textContent = fmtNum(b * (1 - a / 100), 4); break;
     }
   }
-  [mode, A, B].forEach(x => x.addEventListener('input', run));
+  [mode, A, B].forEach(x => { x.addEventListener('input', run); x.addEventListener('change', run); });
   run();
 });
 
 /* 4. Fraction Calculator */
-function gcd(a, b) { return b ? gcd(b, a % b) : Math.abs(a); }
+function gcd(a, b) { a = Math.abs(a); b = Math.abs(b); return b ? gcd(b, a % b) : a; }
 T('fraction-calc', 'Fraction Calculator', 'math', el => {
   el.innerHTML = `
     <div class="field-row"><input type="number" class="inp" id="n1" placeholder="num 1"><input type="number" class="inp" id="d1" placeholder="den 1"></div>
     <div class="row"><select class="inp" id="op" style="max-width:120px"><option>+</option><option>−</option><option>×</option><option>÷</option></select></div>
     <div class="field-row"><input type="number" class="inp" id="n2" placeholder="num 2"><input type="number" class="inp" id="d2" placeholder="den 2"></div>
-    <div class="result big" id="out">--</div>
+    <div class="result big" id="out">—</div>
   `;
   const g = id => el.querySelector('#' + id);
   function run() {
     const n1 = parseInt(g('n1').value), d1 = parseInt(g('d1').value),
           n2 = parseInt(g('n2').value), d2 = parseInt(g('d2').value), op = g('op').value;
-    if (![n1,d1,n2,d2].every(Number.isFinite) || d1 === 0 || d2 === 0) { g('out').textContent = '--'; return; }
+    if (![n1,d1,n2,d2].every(Number.isFinite) || d1 === 0 || d2 === 0) { g('out').textContent = '—'; return; }
     let n, d;
     if (op === '+') { n = n1*d2 + n2*d1; d = d1*d2; }
     else if (op === '−') { n = n1*d2 - n2*d1; d = d1*d2; }
     else if (op === '×') { n = n1*n2; d = d1*d2; }
     else { if (n2 === 0) { g('out').textContent = 'Cannot divide by zero'; return; } n = n1*d2; d = d1*n2; }
+    if (n === 0) { g('out').textContent = '0'; return; }
     const gg = gcd(n, d);
     n /= gg; d /= gg;
     if (d < 0) { n = -n; d = -d; }
     g('out').textContent = d === 1 ? String(n) : `${n}/${d}  (${fmtNum(n/d, 4)})`;
   }
-  el.addEventListener('input', run);
-  run();
+  el.addEventListener('input', run); run();
 });
 
 /* 5. Average Calculator */
@@ -529,7 +555,7 @@ T('ratio-calc', 'Ratio Calculator', 'math', el => {
     <div class="field-row"><input type="number" class="inp" id="a" placeholder="a"><input type="number" class="inp" id="b" placeholder="b"></div>
     <div class="tiny muted">=</div>
     <div class="field-row"><input type="number" class="inp" id="c" placeholder="c"><input type="number" class="inp" id="d" placeholder="d (leave blank to solve)"></div>
-    <div class="result big" id="out">--</div>
+    <div class="result big" id="out">—</div>
   `;
   const g = id => el.querySelector('#' + id);
   function run() {
@@ -604,12 +630,12 @@ T('gpa-calc', 'GPA Calculator', 'study', el => {
   el.innerHTML = `
     <div id="rows"></div>
     <div class="row" style="margin-top:10px"><button class="btn-ghost" id="add">+ Add course</button></div>
-    <div class="result big" id="out">GPA: --</div>
+    <div class="result big" id="out">GPA: —</div>
   `;
   const rows = el.querySelector('#rows'), out = el.querySelector('#out');
   function rowHTML() {
     return `<div class="list-item" style="margin-bottom:6px">
-      <input class="inp" placeholder="Course" style="flex:2">
+      <input class="inp" placeholder="Course" style="flex:2;min-width:80px">
       <input type="number" class="inp" placeholder="Credits" style="flex:0 0 90px;min-width:70px" value="3" min="0">
       <select class="inp" style="flex:0 0 90px;min-width:80px">
         ${Object.keys(GRADE_POINTS).map(g => `<option>${g}</option>`).join('')}
@@ -625,9 +651,9 @@ T('gpa-calc', 'GPA Calculator', 'study', el => {
       const g = r.querySelector('select').value;
       pts += c * GRADE_POINTS[g]; cr += c;
     });
-    out.textContent = 'GPA: ' + (cr ? fmtNum(pts / cr, 3) : '--');
+    out.textContent = 'GPA: ' + (cr ? fmtNum(pts / cr, 3) : '—');
   }
-  addRow(); addRow();
+  addRow(); addRow(); calc();
   el.querySelector('#add').onclick = () => { addRow(); calc(); };
   rows.addEventListener('input', calc);
   rows.addEventListener('change', calc);
@@ -641,12 +667,12 @@ T('cgpa-calc', 'CGPA Calculator', 'study', el => {
   el.innerHTML = `
     <div id="rows"></div>
     <div class="row" style="margin-top:10px"><button class="btn-ghost" id="add">+ Add semester</button></div>
-    <div class="result big" id="out">CGPA: --</div>
+    <div class="result big" id="out">CGPA: —</div>
   `;
   const rows = el.querySelector('#rows'), out = el.querySelector('#out');
   function addRow() {
     rows.insertAdjacentHTML('beforeend', `<div class="list-item" style="margin-bottom:6px">
-      <input class="inp" placeholder="Semester" style="flex:1">
+      <input class="inp" placeholder="Semester" style="flex:1;min-width:80px">
       <input type="number" class="inp" placeholder="GPA" step="0.01" style="flex:0 0 90px">
       <input type="number" class="inp" placeholder="Credits" style="flex:0 0 90px" value="20">
       <button class="x" type="button">×</button>
@@ -659,11 +685,12 @@ T('cgpa-calc', 'CGPA Calculator', 'study', el => {
       const g = parseFloat(ins[1].value), c = parseFloat(ins[2].value);
       if (isFinite(g) && isFinite(c)) { pts += g * c; cr += c; }
     });
-    out.textContent = 'CGPA: ' + (cr ? fmtNum(pts / cr, 3) : '--');
+    out.textContent = 'CGPA: ' + (cr ? fmtNum(pts / cr, 3) : '—');
   }
-  addRow(); addRow();
-  el.querySelector('#add').onclick = () => { addRow(); };
+  addRow(); addRow(); calc();
+  el.querySelector('#add').onclick = () => { addRow(); calc(); };
   rows.addEventListener('input', calc);
+  rows.addEventListener('change', calc);
   rows.addEventListener('click', e => { if (e.target.classList.contains('x')) { e.target.closest('.list-item').remove(); calc(); } });
 });
 
@@ -671,13 +698,13 @@ T('cgpa-calc', 'CGPA Calculator', 'study', el => {
 T('pct-to-grade', 'Percentage to Grade', 'study', el => {
   el.innerHTML = `
     <input type="number" class="inp" id="p" placeholder="Percentage (0–100)" min="0" max="100" step="any">
-    <div class="result big" id="out">--</div>
-    <p class="tiny muted">Standard scale: 90+ A, 80+ B, 70+ C, 60+ D, else F. Adjust expectations to your institution.</p>
+    <div class="result big" id="out">—</div>
+    <p class="tiny muted">Standard scale: 90+ A, 80+ B, 70+ C, 60+ D, else F.</p>
   `;
   const p = el.querySelector('#p'), out = el.querySelector('#out');
   p.addEventListener('input', () => {
     const v = parseFloat(p.value);
-    if (!isFinite(v) || v < 0 || v > 100) { out.textContent = '--'; return; }
+    if (!isFinite(v) || v < 0 || v > 100) { out.textContent = '—'; return; }
     let g;
     if (v >= 90) g = 'A'; else if (v >= 80) g = 'B'; else if (v >= 70) g = 'C'; else if (v >= 60) g = 'D'; else g = 'F';
     out.textContent = g + '  (' + fmtNum(v, 1) + '%)';
@@ -724,7 +751,7 @@ T('exam-countdown', 'Exam Countdown', 'study', el => {
     const target = new Date(when.value).getTime();
     function tick() {
       const diff = target - Date.now();
-      if (diff <= 0) { out.textContent = '🎯 Time\'s up'; return; }
+      if (diff <= 0) { out.textContent = "🎯 Time's up"; return; }
       const d = Math.floor(diff / 86400000);
       const h = Math.floor(diff % 86400000 / 3600000);
       const m = Math.floor(diff % 3600000 / 60000);
@@ -755,8 +782,8 @@ T('study-timer', 'Study Timer', 'study', el => {
     if (running) return; running = true;
     id = toolInterval(() => { secs++; fmt(); }, 1000);
   };
-  el.querySelector('#pause').onclick = () => { running = false; if (id) clearInterval(id); };
-  el.querySelector('#reset').onclick = () => { running = false; if (id) clearInterval(id); secs = 0; fmt(); };
+  el.querySelector('#pause').onclick = () => { running = false; if (id) clearInterval(id); id = null; };
+  el.querySelector('#reset').onclick = () => { running = false; if (id) clearInterval(id); id = null; secs = 0; fmt(); };
 });
 
 /* 19. Pomodoro */
@@ -798,12 +825,16 @@ T('pomodoro', 'Pomodoro Timer', 'study', el => {
       if (left <= 0) { clearInterval(id); running = false; beep(); toast('Session complete', 'success'); }
     }, 1000);
   };
-  el.querySelector('#reset').onclick = () => { if (id) clearInterval(id); running = false; setMode(); };
-  mode.addEventListener('change', () => { if (id) clearInterval(id); running = false; setMode(); });
+  el.querySelector('#reset').onclick = () => { if (id) clearInterval(id); id = null; running = false; setMode(); };
+  mode.addEventListener('change', () => {
+    if (id) { clearInterval(id); id = null; }
+    running = false;
+    setMode();
+  });
   setMode();
 });
 
-/* 20. Study Planner */
+/* 20. Study Planner — stable IDs so delete works after sort */
 T('study-planner', 'Daily Study Planner', 'study', el => {
   const KEY = 'planner';
   el.innerHTML = `
@@ -812,21 +843,21 @@ T('study-planner', 'Daily Study Planner', 'study', el => {
     <div class="list" id="list" style="margin-top:12px"></div>
   `;
   const sub = el.querySelector('#sub'), tm = el.querySelector('#tm'), list = el.querySelector('#list');
-  function save(items) { LS.set(KEY, items); }
   function draw() {
-    const items = LS.get(KEY, []).sort((a, b) => a.t.localeCompare(b.t));
-    list.innerHTML = items.length ? items.map((it, i) => `
-      <div class="list-item"><span class="grow"><strong>${esc(it.t)}</strong> -- ${esc(it.s)}</span>
-        <button class="x" data-i="${i}">×</button></div>
+    const items = [...LS.get(KEY, [])].sort((a, b) => a.t.localeCompare(b.t));
+    list.innerHTML = items.length ? items.map(it => `
+      <div class="list-item"><span class="grow"><strong>${esc(it.t)}</strong> — ${esc(it.s)}</span>
+        <button class="x" data-id="${it.id}">×</button></div>
     `).join('') : '<p class="muted tiny">No blocks yet.</p>';
     list.querySelectorAll('.x').forEach(b => b.onclick = () => {
-      const arr = LS.get(KEY, []); arr.splice(+b.dataset.i, 1); save(arr); draw();
+      LS.set(KEY, LS.get(KEY, []).filter(x => x.id !== b.dataset.id)); draw();
     });
   }
   el.querySelector('#add').onclick = () => {
     if (!sub.value.trim() || !tm.value) { toast('Enter subject and time', 'error'); return; }
-    const arr = LS.get(KEY, []); arr.push({ s: sub.value.trim(), t: tm.value }); save(arr);
-    sub.value = ''; draw();
+    const arr = LS.get(KEY, []);
+    arr.push({ id: Date.now() + '-' + Math.random().toString(36).slice(2, 7), s: sub.value.trim(), t: tm.value });
+    LS.set(KEY, arr); sub.value = ''; draw();
   };
   draw();
 });
@@ -835,7 +866,7 @@ T('study-planner', 'Daily Study Planner', 'study', el => {
 T('revision-sched', 'Revision Scheduler', 'study', el => {
   el.innerHTML = `
     <label class="field"><span>Exam date</span><input type="date" class="inp" id="d"></label>
-    <label class="field"><span>Topic / subject</span><input class="inp" id="s" placeholder="e.g. Biology -- Chapter 5"></label>
+    <label class="field"><span>Topic / subject</span><input class="inp" id="s" placeholder="e.g. Biology — Chapter 5"></label>
     <button class="btn" id="run">Generate schedule</button>
     <div id="out" style="margin-top:14px"></div>
   `;
@@ -848,7 +879,7 @@ T('revision-sched', 'Revision Scheduler', 'study', el => {
     const out = el.querySelector('#out');
     const rows = offsets.map(n => {
       const date = new Date(target); date.setDate(date.getDate() - n);
-      return `<div class="list-item"><span class="grow">${date.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'})} -- review ${esc(s)}</span>
+      return `<div class="list-item"><span class="grow">${date.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'})} — review ${esc(s)}</span>
         <span class="tiny muted">T-${n}d</span></div>`;
     }).join('');
     out.innerHTML = `<h3 style="margin-bottom:8px">Spaced revision plan</h3><div class="list">${rows}</div>`;
@@ -861,7 +892,8 @@ T('flip-card', 'Flashcard Creator', 'study', el => {
   el.innerHTML = `
     <div class="field-row"><input class="inp" id="front" placeholder="Front (question)"><input class="inp" id="back" placeholder="Back (answer)"></div>
     <div class="row"><button class="btn" id="add">Add card</button>
-      <button class="btn-ghost" id="next">Next card</button></div>
+      <button class="btn-ghost" id="next">Next card</button>
+      <button class="btn-ghost" id="reset">Reset deck</button></div>
     <div class="flashcard" id="card" style="margin-top:14px">Add cards to begin.</div>
     <p class="tiny muted" id="counter"></p>
   `;
@@ -885,6 +917,9 @@ T('flip-card', 'Flashcard Creator', 'study', el => {
     const arr = LS.get(KEY, []); if (!arr.length) return;
     idx = (idx + 1) % arr.length; flipped = false; draw();
   };
+  el.querySelector('#reset').onclick = () => {
+    if (confirm('Delete all flashcards?')) { LS.set(KEY, []); idx = 0; flipped = false; draw(); }
+  };
   card.onclick = () => { flipped = !flipped; draw(); };
   draw();
 });
@@ -894,7 +929,7 @@ T('random-q', 'Random Question Generator', 'study', el => {
   el.innerHTML = `
     <textarea class="inp" id="qs" placeholder="Paste your question bank, one per line"></textarea>
     <button class="btn" id="pick">Pick a random question</button>
-    <div class="result" id="out" style="margin-top:12px">--</div>
+    <div class="result" id="out" style="margin-top:12px">—</div>
   `;
   el.querySelector('#pick').onclick = () => {
     const qs = el.querySelector('#qs').value.split('\n').map(s => s.trim()).filter(Boolean);
@@ -925,7 +960,7 @@ T('notes', 'Study Notes Manager', 'study', el => {
       const n = LS.get(KEY, [])[+b.dataset.open]; title.value = n.title; body.value = n.body;
     });
     list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
-      const arr = LS.get(KEY, []); arr.splice(+b.dataset.del, 1); LS.set(KEY, arr); draw();
+      const arr2 = LS.get(KEY, []); arr2.splice(+b.dataset.del, 1); LS.set(KEY, arr2); draw();
     });
   }
   el.querySelector('#save').onclick = () => {
@@ -1042,7 +1077,7 @@ T('text-reverse', 'Text Reverser', 'writing', el => {
   el.addEventListener('click', e => {
     const b = e.target.closest('[data-m]'); if (!b) return;
     if (b.dataset.m === 'chars') t.value = [...t.value].reverse().join('');
-    else if (b.dataset.m === 'words') t.value = t.value.split(/\b/).reverse().join('');
+    else if (b.dataset.m === 'words') t.value = t.value.split(/\s+/).reverse().join(' ');
     else t.value = t.value.split('\n').reverse().join('\n');
   });
   el.querySelector('#copy').onclick = () => copyText(t.value);
@@ -1165,7 +1200,7 @@ T('clock', 'Digital Clock', 'daily', el => {
   tick(); toolInterval(tick, 1000);
 });
 
-/* 37. Stopwatch */
+/* 37. Stopwatch — setInterval (cleans up with toolTimers) */
 T('stopwatch', 'Stopwatch', 'daily', el => {
   el.innerHTML = `
     <div class="result big" id="out" style="text-align:center;font-size:3rem">00:00.00</div>
@@ -1175,22 +1210,24 @@ T('stopwatch', 'Stopwatch', 'daily', el => {
     <div class="list" id="laps" style="margin-top:12px"></div>
   `;
   const out = el.querySelector('#out'), lapsEl = el.querySelector('#laps');
-  let start = 0, elapsed = 0, running = false, raf = null, laps = [];
+  let start = 0, elapsed = 0, running = false, id = null, laps = [];
   function fmt(ms) {
     const m = String(Math.floor(ms/60000)).padStart(2,'0');
     const s = String(Math.floor(ms%60000/1000)).padStart(2,'0');
     const cs = String(Math.floor(ms%1000/10)).padStart(2,'0');
     return `${m}:${s}.${cs}`;
   }
-  function loop() {
-    if (!running) return;
-    out.textContent = fmt(elapsed + (Date.now() - start));
-    raf = requestAnimationFrame(loop);
-    if (toolTimers.indexOf('raf-swatch') === -1) toolTimers.push('raf-swatch');
-  }
+  function tick() { out.textContent = fmt(elapsed + (Date.now() - start)); }
   el.querySelector('#start').onclick = () => {
-    if (running) { running = false; elapsed += Date.now() - start; cancelAnimationFrame(raf); el.querySelector('#start').textContent = 'Start'; }
-    else { running = true; start = Date.now(); loop(); el.querySelector('#start').textContent = 'Pause'; }
+    if (running) {
+      running = false; elapsed += Date.now() - start;
+      if (id) clearInterval(id); id = null;
+      el.querySelector('#start').textContent = 'Start';
+    } else {
+      running = true; start = Date.now();
+      id = toolInterval(tick, 30);
+      el.querySelector('#start').textContent = 'Pause';
+    }
   };
   el.querySelector('#lap').onclick = () => {
     if (!running) return;
@@ -1198,13 +1235,14 @@ T('stopwatch', 'Stopwatch', 'daily', el => {
     lapsEl.innerHTML = laps.map((t, i) => `<div class="list-item"><span class="grow">Lap ${laps.length - i}</span><span class="tiny muted">${fmt(t)}</span></div>`).join('');
   };
   el.querySelector('#reset').onclick = () => {
-    running = false; cancelAnimationFrame(raf);
+    running = false;
+    if (id) clearInterval(id); id = null;
     elapsed = 0; out.textContent = '00:00.00'; laps = []; lapsEl.innerHTML = '';
     el.querySelector('#start').textContent = 'Start';
   };
 });
 
-/* 38. Countdown Timer */
+/* 38. Countdown Timer — recomputes on idle input change */
 T('countdown', 'Countdown Timer', 'daily', el => {
   el.innerHTML = `
     <div class="field-row">
@@ -1232,18 +1270,27 @@ T('countdown', 'Countdown Timer', 'daily', el => {
       o.start(); o.stop(ctx.currentTime + 1.4);
     } catch {}
   }
+  function recomputeIdle() {
+    if (running) return;
+    total = Math.max(0, (parseInt(m.value) || 0) * 60 + (parseInt(s.value) || 0));
+    left = total; render();
+  }
+  m.addEventListener('input', recomputeIdle);
+  s.addEventListener('input', recomputeIdle);
   el.querySelector('#go').onclick = () => {
     if (running) return;
-    total = (parseInt(m.value) || 0) * 60 + (parseInt(s.value) || 0);
-    if (left <= 0 || left === total) left = total;
     if (left <= 0) { toast('Set a duration', 'error'); return; }
     running = true;
     id = toolInterval(() => {
       left--; render();
-      if (left <= 0) { clearInterval(id); running = false; beep(); toast('Time up', 'success'); }
+      if (left <= 0) { clearInterval(id); id = null; running = false; beep(); toast('Time up', 'success'); }
     }, 1000);
   };
-  el.querySelector('#reset').onclick = () => { clearInterval(id); running = false; left = total; render(); };
+  el.querySelector('#reset').onclick = () => {
+    if (id) clearInterval(id); id = null; running = false;
+    total = Math.max(0, (parseInt(m.value) || 0) * 60 + (parseInt(s.value) || 0));
+    left = total; render();
+  };
   render();
 });
 
@@ -1304,7 +1351,7 @@ T('calendar', 'Calendar', 'daily', el => {
     for (let i = 0; i < first; i++) html += `<div class="cal-cell mute"></div>`;
     for (let d = 1; d <= daysInMonth; d++) {
       const isToday = today.getFullYear() === y && today.getMonth() === m && today.getDate() === d;
-      html += `<div class="cal-cell ${isToday ? 'today' : ''}" data-d="${d}">${d}</div>`;
+      html += `<div class="cal-cell ${isToday ? 'today' : ''}">${d}</div>`;
     }
     grid.innerHTML = html;
   }
@@ -1325,14 +1372,14 @@ T('age-calc', 'Age Calculator', 'daily', el => {
     const b = new Date(dob.value + 'T00:00:00'), n = new Date();
     if (b > n) { out.innerHTML = '<div class="result error">Date is in the future</div>'; return; }
     let y = n.getFullYear() - b.getFullYear();
-    let m = n.getMonth() - b.getMonth();
+    let mo = n.getMonth() - b.getMonth();
     let d = n.getDate() - b.getDate();
-    if (d < 0) { m--; d += new Date(n.getFullYear(), n.getMonth(), 0).getDate(); }
-    if (m < 0) { y--; m += 12; }
+    if (d < 0) { mo--; d += new Date(n.getFullYear(), n.getMonth(), 0).getDate(); }
+    if (mo < 0) { y--; mo += 12; }
     const days = Math.floor((n - b) / 86400000);
     out.innerHTML = `
       <div class="stat"><span class="stat-v">${y}</span><span class="stat-l">Years</span></div>
-      <div class="stat"><span class="stat-v">${m}</span><span class="stat-l">Months</span></div>
+      <div class="stat"><span class="stat-v">${mo}</span><span class="stat-l">Months</span></div>
       <div class="stat"><span class="stat-v">${d}</span><span class="stat-l">Days</span></div>
       <div class="stat"><span class="stat-v">${fmtNum(days, 0)}</span><span class="stat-l">Total days</span></div>
     `;
@@ -1348,9 +1395,7 @@ T('date-diff', 'Date Difference Calculator', 'daily', el => {
   const a = el.querySelector('#a'), b = el.querySelector('#b'), out = el.querySelector('#out');
   function run() {
     if (!a.value || !b.value) { out.innerHTML = ''; return; }
-    const d1 = new Date(a.value), d2 = new Date(b.value);
-    const ms = Math.abs(d2 - d1);
-    const days = Math.floor(ms / 86400000);
+    const days = Math.floor(Math.abs(new Date(b.value) - new Date(a.value)) / 86400000);
     out.innerHTML = `
       <div class="stat"><span class="stat-v">${days}</span><span class="stat-l">Days</span></div>
       <div class="stat"><span class="stat-v">${Math.floor(days/7)}</span><span class="stat-l">Weeks</span></div>
@@ -1365,11 +1410,11 @@ T('date-diff', 'Date Difference Calculator', 'daily', el => {
 T('days-between', 'Days Between Dates', 'daily', el => {
   el.innerHTML = `
     <div class="field-row"><input type="date" class="inp" id="a"><input type="date" class="inp" id="b"></div>
-    <div class="result big" id="out">--</div>
+    <div class="result big" id="out">—</div>
   `;
   const a = el.querySelector('#a'), b = el.querySelector('#b'), out = el.querySelector('#out');
   function run() {
-    if (!a.value || !b.value) { out.textContent = '--'; return; }
+    if (!a.value || !b.value) { out.textContent = '—'; return; }
     const d = Math.abs((new Date(b.value) - new Date(a.value)) / 86400000);
     out.textContent = d + ' day' + (d === 1 ? '' : 's');
   }
@@ -1474,7 +1519,7 @@ T('random-num', 'Random Number Generator', 'daily', el => {
   el.innerHTML = `
     <div class="field-row"><input type="number" class="inp" id="a" value="1"><input type="number" class="inp" id="b" value="100"></div>
     <button class="btn" id="gen">Generate</button>
-    <div class="result big" id="out" style="text-align:center">--</div>
+    <div class="result big" id="out" style="text-align:center">—</div>
   `;
   el.querySelector('#gen').onclick = () => {
     const a = parseInt(el.querySelector('#a').value), b = parseInt(el.querySelector('#b').value);
@@ -1488,7 +1533,7 @@ T('random-choice', 'Random Choice Picker', 'daily', el => {
   el.innerHTML = `
     <textarea class="inp" id="t" placeholder="One option per line"></textarea>
     <button class="btn" id="pick">Pick one</button>
-    <div class="result big" id="out" style="text-align:center">--</div>
+    <div class="result big" id="out" style="text-align:center">—</div>
   `;
   el.querySelector('#pick').onclick = () => {
     const items = el.querySelector('#t').value.split('\n').map(s => s.trim()).filter(Boolean);
@@ -1500,8 +1545,6 @@ T('random-choice', 'Random Choice Picker', 'daily', el => {
 /* ============================================================
    E. FILES (49–60)
    ============================================================ */
-
-/* Drop-zone helper */
 function makeDrop(el, onFile, accept = '') {
   el.innerHTML = `
     <div class="drop-zone" id="dz">
@@ -1542,7 +1585,7 @@ T('image-resize', 'Image Resizer', 'files', el => {
     img.onload = () => {
       el.querySelector('#w').value = img.width;
       el.querySelector('#h').value = img.height;
-      dz.setInfo(`${f.name} -- ${img.width}×${img.height}, ${(f.size/1024).toFixed(1)} KB`);
+      dz.setInfo(`${f.name} — ${img.width}×${img.height}, ${(f.size/1024).toFixed(1)} KB`);
       el.querySelector('#run').disabled = false;
     };
     img.src = url;
@@ -1576,10 +1619,7 @@ T('image-convert', 'Image Format Converter', 'files', el => {
     if (!f.type.startsWith('image/')) { toast('Choose an image', 'error'); return; }
     const url = URL.createObjectURL(f);
     img = new Image();
-    img.onload = () => {
-      dz.setInfo(`${f.name} -- ${(f.size/1024).toFixed(1)} KB`);
-      el.querySelector('#run').disabled = false;
-    };
+    img.onload = () => { dz.setInfo(`${f.name} — ${(f.size/1024).toFixed(1)} KB`); el.querySelector('#run').disabled = false; };
     img.src = url;
   }, 'image/*');
   el.querySelector('#run').onclick = () => {
@@ -1608,7 +1648,7 @@ T('image-compress', 'Image Compressor', 'files', el => {
     if (!f.type.startsWith('image/')) { toast('Choose an image', 'error'); return; }
     const url = URL.createObjectURL(f);
     img = new Image();
-    img.onload = () => { dz.setInfo(`${f.name} -- ${(f.size/1024).toFixed(1)} KB original`); el.querySelector('#run').disabled = false; };
+    img.onload = () => { dz.setInfo(`${f.name} — ${(f.size/1024).toFixed(1)} KB original`); el.querySelector('#run').disabled = false; };
     img.src = url;
   }, 'image/*');
   el.querySelector('#run').onclick = () => {
@@ -1692,12 +1732,12 @@ T('pdf-split', 'PDF Splitter', 'files', el => {
 T('pdf-count', 'PDF Page Counter', 'files', el => {
   el.innerHTML = `
     <input type="file" class="inp" id="f" accept="application/pdf">
-    <div class="result big" id="out" style="margin-top:12px">--</div>
+    <div class="result big" id="out" style="margin-top:12px">—</div>
   `;
   const f = el.querySelector('#f'), out = el.querySelector('#out');
   f.addEventListener('change', async () => {
     if (!f.files[0]) return;
-    out.textContent = 'Loading…';
+    out.textContent = 'Loading…'; out.classList.remove('error');
     try {
       await loadScript('https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js');
       const { PDFDocument } = window.PDFLib;
@@ -1736,7 +1776,7 @@ T('json-fmt', 'JSON Formatter', 'files', el => {
   el.querySelector('#copy').onclick = () => copyText(t.value);
 });
 
-/* 57. Base64 */
+/* 57. Base64 — unicode-safe via TextEncoder/TextDecoder */
 T('base64', 'Base64 Encoder / Decoder', 'files', el => {
   el.innerHTML = `
     <textarea class="inp" id="t" placeholder="Text or Base64…"></textarea>
@@ -1747,8 +1787,18 @@ T('base64', 'Base64 Encoder / Decoder', 'files', el => {
     </div>
   `;
   const t = el.querySelector('#t');
-  function enc(s) { return btoa(unescape(encodeURIComponent(s))); }
-  function dec(s) { return decodeURIComponent(escape(atob(s))); }
+  function enc(s) {
+    const bytes = new TextEncoder().encode(s);
+    let bin = '';
+    bytes.forEach(b => bin += String.fromCharCode(b));
+    return btoa(bin);
+  }
+  function dec(s) {
+    const bin = atob(s.replace(/\s+/g, ''));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  }
   el.addEventListener('click', e => {
     const b = e.target.closest('[data-a]'); if (!b) return;
     try { t.value = b.dataset.a === 'enc' ? enc(t.value) : dec(t.value); }
@@ -1769,8 +1819,8 @@ T('csv-view', 'CSV Viewer', 'files', el => {
     if (!text) { toast('Paste CSV first', 'error'); return; }
     const rows = text.split('\n').map(r => r.split(',').map(c => c.trim().replace(/^"|"$/g, '')));
     const out = el.querySelector('#out');
-    out.innerHTML = `<table class="tt" style="width:100%;border-collapse:collapse">
-      <thead><tr>${rows[0].map(c => `<th style="border:1px solid var(--border);padding:6px;background:var(--surface-2)">${esc(c)}</th>`).join('')}</tr></thead>
+    out.innerHTML = `<table style="width:100%;border-collapse:collapse">
+      <thead><tr>${rows[0].map(c => `<th style="border:1px solid var(--border);padding:6px;background:var(--surface-2);text-align:left">${esc(c)}</th>`).join('')}</tr></thead>
       <tbody>${rows.slice(1).map(r => `<tr>${r.map(c => `<td style="border:1px solid var(--border);padding:6px">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
     </table>`;
   };
@@ -1786,7 +1836,7 @@ T('txt-view', 'Text File Viewer', 'files', el => {
   el.querySelector('#f').addEventListener('change', async e => {
     const f = e.target.files[0]; if (!f) return;
     const text = await readFile(f, 'text');
-    el.querySelector('#meta').textContent = `${f.name} -- ${(f.size/1024).toFixed(1)} KB`;
+    el.querySelector('#meta').textContent = `${f.name} — ${(f.size/1024).toFixed(1)} KB`;
     el.querySelector('#out').value = text;
   });
 });
@@ -1837,8 +1887,6 @@ T('md-preview', 'Markdown Previewer', 'files', el => {
    F. PRODUCTIVITY (61–70)
    ============================================================ */
 
-function todayKey() { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth()+1) + '-' + d.getDate(); }
-
 /* 61. To-Do List */
 T('to-do', 'To-Do List', 'prod', el => {
   const KEY = 'todo';
@@ -1864,7 +1912,7 @@ T('to-do', 'To-Do List', 'prod', el => {
   input.addEventListener('keydown', e => { if (e.key === 'Enter') el.querySelector('#add').click(); });
   list.addEventListener('click', e => {
     const cb = e.target.closest('.checkbox');
-    if (cb) { const arr = LS.get(KEY, []); arr[+cb.dataset.i].done = cb.checked; LS.set(KEY, arr); draw(); }
+    if (cb) { const arr = LS.get(KEY, []); arr[+cb.dataset.i].done = cb.checked; LS.set(KEY, arr); draw(); return; }
     const x = e.target.closest('[data-del]');
     if (x) { const arr = LS.get(KEY, []); arr.splice(+x.dataset.del, 1); LS.set(KEY, arr); draw(); }
   });
@@ -1884,12 +1932,11 @@ T('habits', 'Daily Habit Tracker', 'prod', el => {
     if (!arr.length) { grid.innerHTML = '<p class="muted tiny">Add a habit to start tracking.</p>'; return; }
     const days = [];
     for (let i = 6; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); days.push(d); }
-    const today = new Date();
     grid.innerHTML = `
-      <table class="tt" style="border-collapse:collapse;width:100%;min-width:400px">
+      <table style="border-collapse:collapse;width:100%;min-width:400px">
         <thead><tr><th style="border:1px solid var(--border);padding:6px;background:var(--surface-2);text-align:left">Habit</th>
           ${days.map(d => `<th style="border:1px solid var(--border);padding:6px;background:var(--surface-2);font-size:.72rem">${d.toLocaleDateString(undefined,{weekday:'short'})}</th>`).join('')}
-          <th></th></tr></thead>
+          <th style="border:1px solid var(--border);background:var(--surface-2)"></th></tr></thead>
         <tbody>${arr.map((h, i) => `<tr>
           <td style="border:1px solid var(--border);padding:6px">${esc(h.name)}</td>
           ${days.map(d => {
@@ -1904,14 +1951,14 @@ T('habits', 'Daily Habit Tracker', 'prod', el => {
       </table>`;
     grid.querySelectorAll('input[type=checkbox]').forEach(cb => {
       cb.addEventListener('change', () => {
-        const arr = LS.get(KEY, []);
-        arr[+cb.dataset.h].log = arr[+cb.dataset.h].log || {};
-        arr[+cb.dataset.h].log[cb.dataset.d] = cb.checked;
-        LS.set(KEY, arr);
+        const arr2 = LS.get(KEY, []);
+        arr2[+cb.dataset.h].log = arr2[+cb.dataset.h].log || {};
+        arr2[+cb.dataset.h].log[cb.dataset.d] = cb.checked;
+        LS.set(KEY, arr2);
       });
     });
     grid.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
-      const arr = LS.get(KEY, []); arr.splice(+b.dataset.del, 1); LS.set(KEY, arr); draw();
+      const arr2 = LS.get(KEY, []); arr2.splice(+b.dataset.del, 1); LS.set(KEY, arr2); draw();
     });
   }
   el.querySelector('#add').onclick = () => {
@@ -1976,7 +2023,7 @@ T('diary', 'Personal Diary', 'prod', el => {
     });
   }
   el.querySelector('#save').onclick = () => {
-    if (!tInp.value.trim()) return;
+    if (!tInp.value.trim()) { toast('Write something first', 'error'); return; }
     const arr = LS.get(KEY, []);
     arr.unshift({ date: dInp.value, text: tInp.value });
     LS.set(KEY, arr); tInp.value = ''; draw(); toast('Saved', 'success');
@@ -2000,11 +2047,11 @@ T('quick-notes', 'Quick Notes', 'prod', el => {
   });
 });
 
-/* 66. Goal Tracker */
+/* 66. Goal Tracker — slider updates data only, no full redraw */
 T('goals', 'Goal Tracker', 'prod', el => {
   const KEY = 'goals';
   el.innerHTML = `
-    <div class="field-row"><input class="inp" id="t" placeholder="Goal"><input type="number" class="inp" id="p" placeholder="Target %" value="100" style="flex:0 0 110px"></div>
+    <div class="field-row"><input class="inp" id="t" placeholder="Goal"><input type="number" class="inp" id="p" placeholder="Target" value="100" style="flex:0 0 110px"></div>
     <div class="row"><button class="btn" id="add">Add goal</button></div>
     <div class="list" id="list" style="margin-top:12px"></div>
   `;
@@ -2014,14 +2061,17 @@ T('goals', 'Goal Tracker', 'prod', el => {
       <div class="list-item" style="flex-direction:column;align-items:stretch;gap:4px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
           <strong class="grow">${esc(g.text)}</strong>
-          <span class="tiny muted">${g.progress}/${g.target}</span>
+          <span class="tiny muted" id="lab-${i}">${g.progress}/${g.target}</span>
           <button class="x" data-del="${i}">×</button>
         </div>
         <input type="range" min="0" max="${g.target}" value="${g.progress}" data-i="${i}" style="width:100%">
       </div>`).join('') : '<p class="muted tiny">No goals yet.</p>';
     el.querySelectorAll('input[type=range]').forEach(r => r.addEventListener('input', () => {
-      const arr2 = LS.get(KEY, []); arr2[+r.dataset.i].progress = +r.value; LS.set(KEY, arr2);
-      draw();
+      const arr2 = LS.get(KEY, []);
+      arr2[+r.dataset.i].progress = +r.value;
+      LS.set(KEY, arr2);
+      const lab = el.querySelector('#lab-' + r.dataset.i);
+      if (lab) lab.textContent = `${r.value}/${arr2[+r.dataset.i].target}`;
     }));
     el.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
       const arr2 = LS.get(KEY, []); arr2.splice(+b.dataset.del, 1); LS.set(KEY, arr2); draw();
@@ -2067,27 +2117,30 @@ T('assignments', 'Assignment Tracker', 'prod', el => {
     <div class="list" id="list" style="margin-top:12px"></div>
   `;
   function draw() {
-    const arr = LS.get(KEY, []).sort((a, b) => (a.due || '').localeCompare(b.due || ''));
-    el.querySelector('#list').innerHTML = arr.length ? arr.map((a, i) => {
+    const arr = [...LS.get(KEY, [])].sort((a, b) => (a.due || '').localeCompare(b.due || ''));
+    el.querySelector('#list').innerHTML = arr.length ? arr.map((a) => {
       const days = a.due ? Math.ceil((new Date(a.due) - new Date()) / 86400000) : null;
       const warn = days !== null && days <= 3 && !a.done;
       return `<div class="list-item ${a.done ? 'done' : ''}">
-        <input type="checkbox" class="checkbox" ${a.done ? 'checked' : ''} data-i="${i}">
+        <input type="checkbox" class="checkbox" ${a.done ? 'checked' : ''} data-id="${a.id}">
         <span class="grow">${esc(a.text)} ${a.due ? `<br><span class="sub" style="color:${warn ? 'var(--danger)' : 'inherit'}">Due ${esc(a.due)}${days !== null ? ' · ' + (days >= 0 ? days + 'd' : 'overdue') : ''}</span>` : ''}</span>
-        <button class="x" data-del="${i}">×</button>
+        <button class="x" data-del="${a.id}">×</button>
       </div>`;
     }).join('') : '<p class="muted tiny">No assignments yet.</p>';
     el.querySelectorAll('.checkbox').forEach(cb => cb.addEventListener('change', () => {
-      const arr2 = LS.get(KEY, []); arr2[+cb.dataset.i].done = cb.checked; LS.set(KEY, arr2); draw();
+      const arr2 = LS.get(KEY, []);
+      const item = arr2.find(x => x.id === cb.dataset.id);
+      if (item) item.done = cb.checked;
+      LS.set(KEY, arr2); draw();
     }));
     el.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
-      const arr2 = LS.get(KEY, []); arr2.splice(+b.dataset.del, 1); LS.set(KEY, arr2); draw();
+      LS.set(KEY, LS.get(KEY, []).filter(x => x.id !== b.dataset.del)); draw();
     });
   }
   el.querySelector('#add').onclick = () => {
     const t = el.querySelector('#t').value.trim(); if (!t) return;
     const arr = LS.get(KEY, []);
-    arr.push({ text: t, due: el.querySelector('#d').value, done: false });
+    arr.push({ id: Date.now() + '-' + Math.random().toString(36).slice(2, 7), text: t, due: el.querySelector('#d').value, done: false });
     LS.set(KEY, arr); el.querySelector('#t').value = ''; draw();
   };
   draw();
@@ -2149,7 +2202,7 @@ T('shopping', 'Shopping List', 'prod', el => {
   }
   el.querySelector('#add').onclick = () => {
     const t = el.querySelector('#t').value.trim(); if (!t) return;
-    const q = parseInt(el.querySelector('#q').value) || 1;
+    const q = Math.max(1, parseInt(el.querySelector('#q').value) || 1);
     const arr = LS.get(KEY, []); arr.push({ text: t, qty: q, done: false }); LS.set(KEY, arr);
     el.querySelector('#t').value = ''; draw();
   };
@@ -2166,6 +2219,12 @@ function init() {
   buildThemeSwitcher();
   applyTheme(LS.get('theme', 'pure-minimal'));
 
+  /* Single delegated card-click listener — never re-added */
+  app.addEventListener('click', e => {
+    const card = e.target.closest('[data-tool]');
+    if (card) { location.hash = '#/tool/' + card.dataset.tool; }
+  });
+
   document.getElementById('menuToggle').addEventListener('click', () => {
     document.getElementById('sidebar').classList.toggle('open');
     document.getElementById('scrim').classList.toggle('on');
@@ -2179,7 +2238,7 @@ function init() {
     const idx = THEMES.findIndex(t => t.id === cur);
     applyTheme(THEMES[(idx + 1) % THEMES.length].id);
   });
-  document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', () => {
+  $$('.nav-item').forEach(a => a.addEventListener('click', () => {
     document.getElementById('sidebar').classList.remove('open');
     document.getElementById('scrim').classList.remove('on');
   }));
